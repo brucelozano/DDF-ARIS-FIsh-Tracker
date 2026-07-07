@@ -1,0 +1,26 @@
+# Ignore everything by default; allow only release-critical files.
+*
+
+# Keep repository meta and docs
+!.gitignore
+!README.md
+!requirements.txt
+!LICENSE
+
+# Core Python source files
+!aris_reader.py
+!aris_python_api.py
+!opencv_player.py
+!aris_sonar_processing.py
+!fish_detector.py
+!fish_tracking_config.py
+!mangrove_distance_mapper.py
+!aris_utilities.py
+!ddf_compat.py
+!create_mangrove_mask.py
+!simple_visualizer.py
+
+# Keep only sample per-video config templates in config/
+!config/
+config/*
+!config/config_*.json

@@ -1,0 +1,42 @@
+{
+    "_comment": "Fish tracking configuration for 2024-03-27_005926",
+    "_description": "Adjust these parameters for optimal fish detection",
+
+    "INTENSITY_THRESHOLD": 40,
+    "_INTENSITY_THRESHOLD_help": "Pixel brightness threshold (MATLAB BwThres equivalent, 0-255)",
+
+    "MIN_FISH_AREA": 6,
+    "_MIN_FISH_AREA_help": "Minimum fish size in pixels (try 8-25)",
+    "MAX_FISH_AREA": 2500,
+    "_MAX_FISH_AREA_help": "Maximum fish size in pixels (try 1000-3000)",
+
+    "MIN_TRACK_HITS": 2,
+    "_MIN_TRACK_HITS_help": "Frames to confirm track (1=fast, 3=stable)",
+    "MAX_ASSIGNMENT_COST": 65.0,
+    "_MAX_ASSIGNMENT_COST_help": "Max distance for track matching (30-80)",
+
+    "ROI_Y_START": 0.15,
+    "_ROI_Y_START_help": "Skip top portion (0.1-0.3 to avoid noise)",
+    "ROI_Y_END": 0.95,
+    "_ROI_Y_END_help": "Include bottom portion (0.8-0.95)",
+
+    "MORPH_OPENING_SIZE": 1,
+    "MORPH_CLOSING_SIZE": 2,
+
+    "USE_STATIC_PATTERN": true,
+    "STATIC_PATTERN_FILE": "exports/patterns/2024-03-27_005926_pattern.npy",
+    "BW_THRESHOLD": 0.15,
+    "BW_THRESHOLD_MODE": "relative",
+
+    "AGE_THRESHOLD": 1,
+    "_AGE_THRESHOLD_help": "Minimum frames a track must survive (1=lenient, 5-10=strict)",
+    "MIN_VISIBILITY_RATIO": 0.0,
+    "_MIN_VISIBILITY_RATIO_help": "Minimum visibility ratio (0.0=lenient, 0.5-0.7=strict)",
+    "MAX_INVISIBLE_COUNT": 6,
+    "_MAX_INVISIBLE_COUNT_help": "Frames track survives without detection (3-10)",
+
+    "MIN_TRACK_DISPLACEMENT": 8.0,
+    "_MIN_TRACK_DISPLACEMENT_help": "Min total movement in pixels for a track to count as real (filters stationary artifacts, 0=disabled, 3-10=typical)",
+    "MIN_DISPLACEMENT_AGE": 10,
+    "_MIN_DISPLACEMENT_AGE_help": "Frames before displacement filter kicks in (lower=faster artifact removal, higher=more time for box to appear on slow fish, 5-15 typical)"
+}
