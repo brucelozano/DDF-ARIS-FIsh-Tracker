@@ -20,6 +20,9 @@
 !create_mangrove_mask.py
 !simple_visualizer.py
 
+# Keep the bluebar.mat file
+!bluebar.mat
+
 # Keep only sample per-video config templates in config/
 !config/
 config/*
