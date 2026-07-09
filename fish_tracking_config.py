@@ -84,6 +84,9 @@ class FishTrackingConfig:
         self.STATIC_PATTERN_FRAMES = 200    # Frames to use for pattern computation
         self.BW_THRESHOLD = 0.15            # Binary threshold for pattern difference
         self.BW_THRESHOLD_MODE = "relative" # "relative" (0-1) or "absolute" (0-255)
+        self.FAN_IMAGE_X_SIZE = 400         # Fan image width in pixels (MATLAB tutorial commonly uses 500)
+        self.FAN_HALF_ANGLE_DEG = 14.0      # Half field-of-view used by fan mapping (MATLAB legacy mapscan uses 14.4)
+        self.FAN_BEAM_SMOOTH = 4            # Beam interpolation factor (MATLAB smooth: 1, 4, or 8)
 
         # === MANGROVE MASK (OPTIONAL - MATLAB parity) ===
         self.MANGROVE_MASK_FILE = ""        # Path to binary PNG mask (optional)
@@ -179,6 +182,10 @@ class FishTrackingConfig:
         print(f"Track Confirmation: {self.MIN_TRACK_HITS} frames")
         print(f"ROI Region: Y {self.ROI_Y_START:.1%} - {self.ROI_Y_END:.1%}")
         print(f"Max Concurrent Tracks: {self.MAX_TOTAL_TRACKS}")
+        print(
+            f"Fan Geometry: width={self.FAN_IMAGE_X_SIZE}, "
+            f"half_angle={self.FAN_HALF_ANGLE_DEG:.2f} deg, smooth={self.FAN_BEAM_SMOOTH}"
+        )
         print("=" * 50)
 
 
@@ -259,6 +266,12 @@ def _build_config_template(base_name):
         "_BW_THRESHOLD_help": "Minimum difference from pattern to count as foreground (0.0-1.0 in relative mode)",
         "BW_THRESHOLD_MODE": "relative",
         "_BW_THRESHOLD_MODE_help": "relative = fraction of 255 | absolute = direct 0-255 value",
+        "FAN_IMAGE_X_SIZE": 400,
+        "_FAN_IMAGE_X_SIZE_help": "Fan image width in pixels. Keep pattern/playback consistent. MATLAB tutorial often uses 500.",
+        "FAN_HALF_ANGLE_DEG": 14.0,
+        "_FAN_HALF_ANGLE_DEG_help": "Half field-of-view (degrees) used in fan mapping. MATLAB legacy mapscan uses 14.4.",
+        "FAN_BEAM_SMOOTH": 4,
+        "_FAN_BEAM_SMOOTH_help": "Beam interpolation factor (valid: 1, 4, 8). Must match pattern/playback mapping.",
 
         "PREY_PREDATOR_THRESHOLD_CM": 5.0,
         "_PREY_PREDATOR_THRESHOLD_CM_help": "Fish length below this is counted as prey; otherwise predator",

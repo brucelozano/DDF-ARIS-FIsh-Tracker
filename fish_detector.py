@@ -320,6 +320,27 @@ class FishTrack:
 
 class StaticPatternRemover:
     """Simple static pattern support for SimpleFishDetector"""
+
+    @staticmethod
+    def _pattern_to_uint8(pattern_array):
+        """Normalize loaded pattern arrays to uint8 0..255 for runtime subtraction."""
+        pattern = np.asarray(pattern_array, dtype=np.float32)
+        if pattern.size == 0:
+            raise ValueError("Pattern is empty")
+
+        finite_mask = np.isfinite(pattern)
+        if not finite_mask.any():
+            raise ValueError("Pattern has no finite values")
+
+        finite_vals = pattern[finite_mask]
+        max_val = float(np.max(finite_vals))
+        min_val = float(np.min(finite_vals))
+
+        # MATLAB patterns are commonly stored as doubles in [0, 1].
+        if max_val <= 1.0 and min_val >= 0.0:
+            pattern = pattern * 255.0
+
+        return np.clip(pattern, 0, 255).astype(np.uint8)
     
     def __init__(self, config):
         self.config = config
@@ -334,7 +355,7 @@ class StaticPatternRemover:
             if getattr(self.config, 'USE_STATIC_PATTERN', False) and getattr(self.config, 'STATIC_PATTERN_FILE', ""):
                 path = self.config.STATIC_PATTERN_FILE
                 if path.lower().endswith('.npy') and os.path.exists(path):
-                    self.static_pattern = np.load(path).astype(np.uint8)
+                    self.static_pattern = self._pattern_to_uint8(np.load(path))
                     self.pattern_computed = True
                     print(f"Static pattern loaded from NPY: {path} (shape: {self.static_pattern.shape})")
                 elif path.lower().endswith('.mat') and os.path.exists(path):
@@ -343,7 +364,7 @@ class StaticPatternRemover:
                     # Try common keys
                     for key in ['Pattern', 'pattern', 'static_pattern', 'bluebar', 'P']:
                         if key in mat:
-                            self.static_pattern = mat[key].astype(np.uint8)
+                            self.static_pattern = self._pattern_to_uint8(mat[key])
                             self.pattern_computed = True
                             print(f"Static pattern loaded from MAT: {path} (shape: {self.static_pattern.shape})")
                             break

@@ -13,7 +13,8 @@ import csv
 from datetime import datetime, timedelta
 from collections import defaultdict
 from aris_sonar_processing import FinalCleanMapper
-from fish_detector import create_fish_detector_for_video
+from fish_detector import FishDetector
+from fish_tracking_config import FishTrackingConfig, get_config_for_video
 from ddf_compat import read_file_layout, read_frame_header as parse_ddf_frame_header
 
 
@@ -239,7 +240,12 @@ class OpenCVPlayer:
         # Fish detection
         self.enable_fish_detection = enable_fish_detection
         self.fish_detector = None
-        
+        # Master visibility switch for overlays (does NOT stop detection/tracking).
+        self.show_detection_overlay = True
+
+        # Video-specific config (single source of truth for geometry + tracking)
+        self.video_config = self._load_video_config()
+        self.fan_image_x_size, self.fan_half_angle_deg, self.fan_beam_smooth = self._fan_geometry_from_config()
         
         # UI options
         self.show_raw_window = show_raw_window
@@ -266,6 +272,33 @@ class OpenCVPlayer:
             print(f"Fish detection enabled for: {os.path.basename(filename)}")
         else:
             print(f"Video playback only (no fish detection)")
+
+    def _load_video_config(self):
+        """Load per-video config, falling back to defaults on any error."""
+        try:
+            return get_config_for_video(self.filename)
+        except Exception as e:
+            print(f"Warning: could not load video config ({e}); using defaults.")
+            return FishTrackingConfig()
+
+    def _fan_geometry_from_config(self):
+        """Return sanitized fan-geometry parameters from config."""
+        try:
+            imagexsize = int(getattr(self.video_config, 'FAN_IMAGE_X_SIZE', 400))
+        except Exception:
+            imagexsize = 400
+        try:
+            half_angle = float(getattr(self.video_config, 'FAN_HALF_ANGLE_DEG', 14.0))
+        except Exception:
+            half_angle = 14.0
+        try:
+            smooth = int(getattr(self.video_config, 'FAN_BEAM_SMOOTH', 4))
+        except Exception:
+            smooth = 4
+
+        imagexsize = max(32, imagexsize)
+        smooth = max(1, smooth)
+        return imagexsize, half_angle, smooth
     
     def precompute_mapping(self):
         """Precompute coordinate mapping for performance"""
@@ -291,9 +324,9 @@ class OpenCVPlayer:
         print(f"Using range: {minrange:.4f}m to {maxrange:.4f}m")
         
         # Create coordinate mapping
-        nrows = self.cap.file_info['numbeams'] * 4 - 4 + 1
-        half_angle = 14.0
-        imagexsize = 400
+        nrows = self.cap.file_info['numbeams'] * self.fan_beam_smooth - self.fan_beam_smooth + 1
+        half_angle = self.fan_half_angle_deg
+        imagexsize = self.fan_image_x_size
         
         self.map_data = FinalCleanMapper.mapscan(
             imagexsize, maxrange, minrange,
@@ -310,7 +343,10 @@ class OpenCVPlayer:
             print(f"   Y origin (i0): {i0:.1f} pixels")
             print(f"   X origin (j0): {j0:.1f} pixels")
         
-        print(f"Mapping precomputed: {imagexsize}x{self.map_data['iysize']} output")
+        print(
+            f"Mapping precomputed: {imagexsize}x{self.map_data['iysize']} output "
+            f"(half_angle={half_angle:.2f}, smooth={self.fan_beam_smooth})"
+        )
     
     def load_saved_tracks(self):
         """Load saved tracking data for comparison if available"""
@@ -398,7 +434,7 @@ class OpenCVPlayer:
         """Initialize fish detector with video-specific configuration"""
         if self.enable_fish_detection and self.fish_detector is None:
             try:
-                self.fish_detector = create_fish_detector_for_video(self.filename)
+                self.fish_detector = FishDetector(self.video_config)
                 print(f"Fish detector initialized for this video")
             except Exception as e:
                 print(f"Failed to initialize fish detector: {e}")
@@ -468,13 +504,23 @@ class OpenCVPlayer:
             self.precompute_mapping()
         
         # Apply beam smoothing
-        frame = FinalCleanMapper.expand4(raw_frame)
+        if self.fan_beam_smooth > 1:
+            if self.fan_beam_smooth == 4:
+                frame = FinalCleanMapper.expand4(raw_frame)
+            else:
+                frame = FinalCleanMapper.smooth1(raw_frame, self.fan_beam_smooth, 'expand')
+        else:
+            frame = raw_frame.copy()
         frame[0, 0] = 0
         
         # Use precomputed mapping
         frame_flat = frame.flatten(order='F')
         svector_values = frame_flat[self.map_data['svector'] - 1]
-        fan_image = svector_values.reshape(self.map_data['iysize'], 400, order='F').astype(np.uint8)
+        fan_image = svector_values.reshape(
+            self.map_data['iysize'],
+            self.fan_image_x_size,
+            order='F'
+        ).astype(np.uint8)
         
         return fan_image
     
@@ -546,7 +592,7 @@ class OpenCVPlayer:
             print(f"   SPACE: Play/Pause")
             print(f"   ESC: Exit and auto-export CSVs")
             print(f"   R: Reset to first frame")
-            print(f"   D: Toggle fish detection ON/OFF")
+            print(f"   D: Toggle overlay ON/OFF (detection keeps running)")
             print(f"   C: Clear fish detector (recompute background)")
             print(f"   E: Export statistics NOW (exports CSVs immediately)")
             print(f"   T: Toggle saved tracks overlay (shows exported results)")
@@ -657,7 +703,7 @@ class OpenCVPlayer:
                         try:
                             # Pass frame index so track histories are time-aligned
                             fish_detections = self.fish_detector.detect_fish(fan_frame, frame_index=frame_num)
-                            if fish_detections:
+                            if fish_detections and self.show_detection_overlay:
                                 fan_colored = np.ascontiguousarray(fan_colored, dtype=np.uint8)
                                 fan_colored = self.fish_detector.draw_detections(fan_colored, fish_detections)
                         except Exception as e:
@@ -680,7 +726,7 @@ class OpenCVPlayer:
                     pass_frame_count += 1
                     
                     # Draw saved tracks overlay if enabled
-                    if self.show_saved_tracks and self.saved_tracks is not None:
+                    if self.show_detection_overlay and self.show_saved_tracks and self.saved_tracks is not None:
                         fan_colored = self.draw_saved_tracks(fan_colored, frame_num)
                     
                     # Ensure arrays are contiguous
@@ -708,6 +754,8 @@ class OpenCVPlayer:
                             pattern_active = any(d.get('pattern_active', False) for d in fish_detections)
                             if pattern_active:
                                 fish_text += ' | Pattern: ON'
+                            if not self.show_detection_overlay:
+                                fish_text += ' | Overlay: OFF'
                         else:
                             fish_text = 'Detection: OFF'
                         
@@ -747,12 +795,9 @@ class OpenCVPlayer:
                     if self.enable_fish_detection and self.fish_detector is not None:
                         self.fish_detector.reset()
                     print("Reset to first frame")
-                elif key == ord('d'):  # D - Toggle fish detection
-                    if self.fish_detector is not None:
-                        self.enable_fish_detection = not self.enable_fish_detection
-                        print(f"Fish detection: {'ON' if self.enable_fish_detection else 'OFF'}")
-                    else:
-                        print("Fish detector not available")
+                elif key == ord('d'):  # D - Toggle overlay visibility only
+                    self.show_detection_overlay = not self.show_detection_overlay
+                    print(f"Detection overlay: {'ON' if self.show_detection_overlay else 'OFF'} (tracking still running)")
                 elif key == ord('c'):  # C - Clear fish detector
                     if self.enable_fish_detection and self.fish_detector is not None:
                         self.fish_detector.reset()

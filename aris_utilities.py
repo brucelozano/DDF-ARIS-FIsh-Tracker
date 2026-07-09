@@ -351,7 +351,7 @@ class ARISExporter:
         return output_file
     
     # ===== STATIC PATTERN (MATLAB parity) =====
-    def compute_static_pattern(self, frame_limit=None, imagexsize=400, smooth=4):
+    def compute_static_pattern(self, frame_limit=None, imagexsize=400, smooth=4, half_angle=14.0):
         """
         Compute average static pattern in the cartesian (fan) domain.
         Matches MATLAB's compute_average_pattern_ddf: averages ALL frames.
@@ -360,8 +360,9 @@ class ARISExporter:
             frame_limit: Number of frames to average (None = all frames, matching MATLAB)
             imagexsize: Fan image width (must match detection mapping)
             smooth: Beam smoothing factor
+            half_angle: Half field-of-view in degrees for mapscan
         Returns:
-            pattern (uint8 ndarray): Averaged fan image
+            pattern (float64 ndarray): Averaged fan image in 0..255 scale
         """
         from aris_sonar_processing import FinalCleanMapper
         import numpy as _np
@@ -370,34 +371,73 @@ class ARISExporter:
         num_frames = total_frames if frame_limit is None else min(frame_limit, total_frames)
         if num_frames <= 0:
             raise ValueError("No frames available to compute static pattern")
+        imagexsize = max(32, int(imagexsize))
+        smooth = max(1, int(smooth))
+        half_angle = float(half_angle)
         
         print(f"   Averaging {num_frames} of {total_frames} frames (MATLAB uses all)...")
         accumulator = None
+        map_data = None
+        current_minrange = None
+        current_maxrange = None
+        map_rebuild_count = 0
+        nrows = self.cap.file_info['numbeams'] * smooth - smooth + 1
         
         for i in range(1, num_frames + 1):
             frame_info = self.cap.get_frame_new(i)
             frame = frame_info['frame']
-            temp_data = {
-                'frame': frame,
-                'numbeams': self.cap.file_info['numbeams'],
-                'sampleperchannel': self.cap.file_info['sampleperchannel'],
-                'minrange': frame_info['minrange'],
-                'maxrange': frame_info['maxrange']
-            }
-            fan_img = FinalCleanMapper.make_first_image(temp_data, smooth=smooth, imagexsize=imagexsize)
+            minrange = frame_info['minrange']
+            maxrange = frame_info['maxrange']
+
+            # MATLAB behavior: build map once and only rebuild if range changes.
+            range_changed = bool(frame_info.get('range_changed', False))
+            if (
+                map_data is None
+                or range_changed
+                or minrange != current_minrange
+                or maxrange != current_maxrange
+            ):
+                map_data = FinalCleanMapper.mapscan(
+                    imagexsize,
+                    maxrange,
+                    minrange,
+                    half_angle,
+                    nrows,
+                    self.cap.file_info['sampleperchannel']
+                )
+                current_minrange = minrange
+                current_maxrange = maxrange
+                map_rebuild_count += 1
+
+            if smooth > 1:
+                if smooth == 4:
+                    frame = FinalCleanMapper.expand4(frame)
+                else:
+                    frame = FinalCleanMapper.smooth1(frame, smooth, 'expand')
+            frame = frame.copy()
+            frame[0, 0] = 0
+
+            frame_flat = frame.flatten(order='F')
+            svector_values = frame_flat[map_data['svector'] - 1]
+            fan_img = svector_values.reshape(
+                map_data['iysize'],
+                imagexsize,
+                order='F'
+            )
+
             if accumulator is None:
                 accumulator = _np.zeros_like(fan_img, dtype=_np.float64)
             accumulator += fan_img.astype(_np.float64)
             if i % 100 == 0 or i == num_frames:
                 print(f"   Averaged {i}/{num_frames} frames...")
         
-        pattern = (accumulator / num_frames).astype(_np.uint8)
-        print(f"Static pattern computed: {pattern.shape}")
+        pattern = accumulator / num_frames
+        print(f"Static pattern computed: {pattern.shape} (map rebuilt {map_rebuild_count}x)")
         return pattern
     
     def save_static_pattern(self, output_dir, pattern, base_name=None, also_mat=True):
         """
-        Save static pattern to NPY (and MAT optionally) under output_dir.
+        Save static pattern to NPY (runtime) and MAT (MATLAB-style) under output_dir.
         Returns dict with paths.
         """
         from pathlib import Path as _Path
@@ -408,14 +448,27 @@ class ARISExporter:
         out_dir.mkdir(parents=True, exist_ok=True)
         if base_name is None:
             base_name = _Path(self.filename).stem
+
+        pattern = _np.asarray(pattern, dtype=_np.float64)
+        if pattern.size == 0:
+            raise ValueError("Pattern is empty")
+
+        if _np.nanmax(pattern) <= 1.0:
+            pattern_norm = _np.clip(pattern, 0.0, 1.0)
+            pattern_uint8 = _np.clip(_np.rint(pattern_norm * 255.0), 0, 255).astype(_np.uint8)
+        else:
+            pattern_clipped = _np.clip(pattern, 0.0, 255.0)
+            pattern_uint8 = _np.clip(_np.rint(pattern_clipped), 0, 255).astype(_np.uint8)
+            pattern_norm = pattern_clipped / 255.0
         
         npy_path = out_dir / f"{base_name}_pattern.npy"
-        _np.save(str(npy_path), pattern.astype(_np.uint8))
+        _np.save(str(npy_path), pattern_uint8)
         result = {'npy': str(npy_path)}
         
         if also_mat:
             mat_path = out_dir / f"{base_name}_pattern.mat"
-            _savemat(str(mat_path), {'Pattern': pattern.astype(_np.uint8)})
+            # Keep MATLAB variable name and normalized floating-point scale.
+            _savemat(str(mat_path), {'Pattern': pattern_norm.astype(_np.float64)})
             result['mat'] = str(mat_path)
         
         print(f"Static pattern saved: {result}")
