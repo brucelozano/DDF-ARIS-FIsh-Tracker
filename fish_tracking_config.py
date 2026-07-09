@@ -8,8 +8,9 @@ Per-video configuration system for optimal results
 import cv2
 import os
 import json
+import re
 
-IMANI_CONFIG_DIR = os.path.join("config", "Imani Config")
+CONFIG_ROOT_DIR = "config"
 
 
 class FishTrackingConfig:
@@ -84,6 +85,7 @@ class FishTrackingConfig:
         self.STATIC_PATTERN_FRAMES = 200    # Frames to use for pattern computation
         self.BW_THRESHOLD = 0.15            # Binary threshold for pattern difference
         self.BW_THRESHOLD_MODE = "relative" # "relative" (0-1) or "absolute" (0-255)
+        self.PATTERN_DETECTION_MODE = "subtract_positive"  # MATLAB parity: threshold max(frame-pattern, 0); alternative: "abs_diff"
         self.FAN_IMAGE_X_SIZE = 400         # Fan image width in pixels (MATLAB tutorial commonly uses 500)
         self.FAN_HALF_ANGLE_DEG = 14.0      # Half field-of-view used by fan mapping (MATLAB legacy mapscan uses 14.4)
         self.FAN_BEAM_SMOOTH = 4            # Beam interpolation factor (MATLAB smooth: 1, 4, or 8)
@@ -152,15 +154,19 @@ class FishTrackingConfig:
         """Create a template config file for a specific video"""
         base_name = os.path.splitext(os.path.basename(video_filename))[0]
         config_filename = f"config_{base_name}.json"
+        config_path = _get_template_target_path(video_filename, config_filename)
 
         template = _build_config_template(base_name)
 
         try:
-            with open(config_filename, 'w') as f:
+            template_dir = os.path.dirname(config_path)
+            if template_dir:
+                os.makedirs(template_dir, exist_ok=True)
+            with open(config_path, 'w') as f:
                 json.dump(template, f, indent=4)
-            print(f"Created config template: {config_filename}")
+            print(f"Created config template: {config_path}")
             print(f"   Edit this file to tune parameters for your video")
-            return config_filename
+            return config_path
         except Exception as e:
             print(f" Failed to create template: {e}")
             return None
@@ -266,6 +272,8 @@ def _build_config_template(base_name):
         "_BW_THRESHOLD_help": "Minimum difference from pattern to count as foreground (0.0-1.0 in relative mode)",
         "BW_THRESHOLD_MODE": "relative",
         "_BW_THRESHOLD_MODE_help": "relative = fraction of 255 | absolute = direct 0-255 value",
+        "PATTERN_DETECTION_MODE": "subtract_positive",
+        "_PATTERN_DETECTION_MODE_help": "subtract_positive = MATLAB parity max(frame-pattern,0); abs_diff = legacy |frame-pattern| mask",
         "FAN_IMAGE_X_SIZE": 400,
         "_FAN_IMAGE_X_SIZE_help": "Fan image width in pixels. Keep pattern/playback consistent. MATLAB tutorial often uses 500.",
         "FAN_HALF_ANGLE_DEG": 14.0,
@@ -282,27 +290,100 @@ def _build_config_template(base_name):
     }
 
 
-def _is_imani_video_path(video_filename):
-    """True when the input video path belongs to the Imani dataset folder."""
-    normalized_path = os.path.normpath(str(video_filename)).replace("\\", "/").lower()
-    return "imani ddf" in normalized_path
+def _tokenize_path(path_text):
+    """Normalize a path-like string into lowercase alphanumeric tokens."""
+    normalized = os.path.normpath(str(path_text)).replace("\\", "/").lower()
+    return {token for token in re.split(r"[^a-z0-9]+", normalized) if token}
 
 
-def _get_config_search_order(video_filename, config_filename):
+def _candidate_directory_meta(candidate_path):
     """
-    Build config lookup order while keeping legacy behavior intact.
-
-    For Imani videos, prioritize the dedicated folder first.
-    For all other videos, keep config/ as the primary location.
+    Return (directory_tokens, is_config_root, in_config_tree, directory_depth)
+    for a candidate config file path.
     """
-    default_config_path = os.path.join("config", config_filename)
-    imani_config_path = os.path.join(IMANI_CONFIG_DIR, config_filename)
-    root_config_path = config_filename
+    config_root_norm = os.path.normpath(CONFIG_ROOT_DIR)
+    candidate_norm = os.path.normpath(candidate_path)
+    in_config_tree = (
+        candidate_norm == config_root_norm or
+        candidate_norm.startswith(config_root_norm + os.sep)
+    )
 
-    if _is_imani_video_path(video_filename):
-        return [imani_config_path, default_config_path, root_config_path]
+    if in_config_tree:
+        rel_path = os.path.relpath(candidate_norm, config_root_norm)
+        rel_dir = os.path.dirname(rel_path)
+        if rel_dir == ".":
+            rel_dir = ""
+        directory_tokens = _tokenize_path(rel_dir)
+        directory_depth = 0 if not rel_dir else rel_dir.count(os.sep) + 1
+        is_config_root = directory_depth == 0
+        return directory_tokens, is_config_root, True, directory_depth
 
-    return [default_config_path, imani_config_path, root_config_path]
+    return set(), False, False, 0
+
+
+def _select_best_path_for_video(video_filename, candidate_paths):
+    """
+    Choose the best config path for a video based on directory-name token overlap.
+    If no candidate matches video path tokens, prefer config/ root for compatibility.
+    """
+    if not candidate_paths:
+        return None
+
+    video_tokens = _tokenize_path(video_filename)
+
+    def _rank(candidate_path):
+        directory_tokens, is_config_root, in_config_tree, directory_depth = _candidate_directory_meta(candidate_path)
+        overlap = len(video_tokens.intersection(directory_tokens))
+        return (
+            overlap,
+            1 if is_config_root else 0,
+            1 if in_config_tree else 0,
+            -directory_depth,
+        )
+
+    return max(candidate_paths, key=_rank)
+
+
+def _find_existing_config_path(video_filename, config_filename):
+    """Find an existing config file by recursively scanning config/."""
+    candidate_paths = []
+
+    if os.path.isdir(CONFIG_ROOT_DIR):
+        for current_root, _, filenames in os.walk(CONFIG_ROOT_DIR):
+            if config_filename in filenames:
+                candidate_paths.append(os.path.join(current_root, config_filename))
+
+    # Legacy fallback: allow top-level config files outside config/.
+    if os.path.exists(config_filename):
+        candidate_paths.append(config_filename)
+
+    return _select_best_path_for_video(video_filename, candidate_paths)
+
+
+def _get_template_target_path(video_filename, config_filename):
+    """
+    Choose where to create a new template if no config exists.
+    Prefer matching subfolders under config/; otherwise use config/ root.
+    """
+    if not os.path.isdir(CONFIG_ROOT_DIR):
+        return os.path.join(CONFIG_ROOT_DIR, config_filename)
+
+    candidate_dirs = {CONFIG_ROOT_DIR}
+    for current_root, _, filenames in os.walk(CONFIG_ROOT_DIR):
+        if any(name.startswith("config_") and name.endswith(".json") for name in filenames):
+            candidate_dirs.add(current_root)
+
+    synthesized_paths = [os.path.join(directory, config_filename) for directory in candidate_dirs]
+    selected = _select_best_path_for_video(video_filename, synthesized_paths)
+    if not selected:
+        return os.path.join(CONFIG_ROOT_DIR, config_filename)
+
+    selected_tokens, _, _, _ = _candidate_directory_meta(selected)
+    if selected_tokens:
+        return selected
+
+    # No folder-name match -> use default config/ root.
+    return os.path.join(CONFIG_ROOT_DIR, config_filename)
 
 
 def get_config_for_video(video_filename):
@@ -317,15 +398,12 @@ def get_config_for_video(video_filename):
     """
     base_name = os.path.splitext(os.path.basename(video_filename))[0]
     config_filename = f"config_{base_name}.json"
-    config_candidates = _get_config_search_order(video_filename, config_filename)
+    existing_config_path = _find_existing_config_path(video_filename, config_filename)
+    if existing_config_path:
+        return FishTrackingConfig(existing_config_path)
 
-    # Search order depends on dataset path, but legacy paths are still checked.
-    for candidate_path in config_candidates:
-        if os.path.exists(candidate_path):
-            return FishTrackingConfig(candidate_path)
-
-    # Not found - create template in the primary target for this dataset.
-    template_path = config_candidates[0]
+    # Not found - create template in best-matching config folder (or config/ root).
+    template_path = _get_template_target_path(video_filename, config_filename)
     template_dir = os.path.dirname(template_path)
     if template_dir:
         os.makedirs(template_dir, exist_ok=True)

@@ -117,6 +117,19 @@ class CapMultiThreading:
         self.capture_thread = threading.Thread(target=self._capture_frames, daemon=True)
         self.capture_thread.start()
 
+    def restart_from_frame(self, frame_number=1):
+        """Restart background capture from a specific frame index."""
+        # Stop any prior capture loop/thread first.
+        self.capturing = False
+        if self.capture_thread and self.capture_thread.is_alive():
+            self.capture_thread.join(timeout=1.0)
+
+        # Reset buffer + frame pointer, then relaunch capture.
+        self.frame_buffer.clear()
+        frame_number = int(max(1, min(frame_number, self.max_frames)))
+        self.current_frame_num = frame_number
+        self.start_capture()
+
     def get_frame(self):
         """Get next frame from buffer"""
         import time as _time
@@ -546,6 +559,7 @@ class OpenCVPlayer:
             # Validate frame range
             self.first_frame = max(1, first)
             self.last_frame = min(info['numframes'], last)
+            full_range_selected = (self.first_frame == 1 and self.last_frame >= info['numframes'])
             
             print(f"\nPlaying frames {self.first_frame} to {self.last_frame}")
             
@@ -645,30 +659,37 @@ class OpenCVPlayer:
                                 except Exception as e:
                                     print(f"Export failed: {e}\n")
                             
-                            # Check if this was a long video (auto-exit after one pass)
+                            # Full-range analysis should finish after one pass (exported above).
+                            if full_range_selected:
+                                print("Full-range pass complete; closing player (no auto-loop).")
+                                break
+
+                            # Keep old protection for very long partial segments.
                             total_frames_processed = self.last_frame - self.first_frame + 1
                             if total_frames_processed >= 5000:
-                                print(f"Large video processing complete ({total_frames_processed} frames)")
-                                print(f"   Exiting automatically to prevent memory issues")
-                                print(f"   (Videos with 5000+ frames exit after one pass)")
-                                break  # Exit instead of looping
+                                print(f"Large segment complete ({total_frames_processed} frames)")
+                                print("   Exiting automatically to prevent memory issues")
+                                break
                             
                             # Prepare for next loop (smaller videos only)
                             print("📹 Looping to start...")
-                            self.cap.current_frame_num = self.first_frame
+                            self.cap.restart_from_frame(self.first_frame)
+                            self._last_frame_num = self.first_frame - 1
                             
                             # Reset for next pass
+                            self.current_pass += 1
+                            self.pass_completed = False
+                            # Reset per-pass counters
+                            pass_frame_count = 0
+                            pass_detection_count = 0
+                            pass_start_time = time.time()
                             if self.enable_fish_detection and self.fish_detector is not None:
                                 self.fish_detector.tracks = []
                                 self.fish_detector.next_track_id = 1
                                 self.frame_to_tracks.clear()
-                                self.current_pass += 1
-                                self.pass_completed = False
-                                # Reset per-pass counters
-                                pass_frame_count = 0
-                                pass_detection_count = 0
-                                pass_start_time = time.time()
                                 print(f"Pass #{self.current_pass} started (background model preserved)")
+                            else:
+                                print(f"Pass #{self.current_pass} started")
                             
                             self.loop_just_reset = True
                         continue
@@ -791,7 +812,8 @@ class OpenCVPlayer:
                     self.playing = not self.playing
                     print(f"{'Playing' if self.playing else 'Paused'}")
                 elif key == ord('r'):  # R - Reset
-                    self.cap.current_frame_num = self.first_frame
+                    self.cap.restart_from_frame(self.first_frame)
+                    self._last_frame_num = self.first_frame - 1
                     if self.enable_fish_detection and self.fish_detector is not None:
                         self.fish_detector.reset()
                     print("Reset to first frame")

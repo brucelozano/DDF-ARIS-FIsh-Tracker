@@ -401,6 +401,35 @@ class StaticPatternRemover:
         
         result = np.clip(frame.astype(np.int16) - self.static_pattern.astype(np.int16), 0, 255)
         return result.astype(np.uint8)
+
+    def _resolve_bw_threshold(self):
+        """Resolve BW threshold to uint8 scale (0..255)."""
+        mode = str(getattr(self.config, 'BW_THRESHOLD_MODE', 'auto')).lower()
+        bw = getattr(self.config, 'BW_THRESHOLD', 0.0)
+
+        if mode == 'absolute' or (mode == 'auto' and bw > 1.0):
+            return int(min(max(bw, 0), 255))
+        if mode == 'relative' or (mode == 'auto' and 0.0 <= bw <= 1.0):
+            return int(min(max(bw, 0.0), 1.0) * 255)
+        return 25
+
+    def positive_residual_mask(self, frame):
+        """MATLAB-style mask from max(frame - pattern, 0) thresholding."""
+        if not self.pattern_computed or self.static_pattern is None:
+            return None
+
+        if frame.shape != self.static_pattern.shape:
+            return None
+
+        residual = np.clip(
+            frame.astype(np.int16) - self.static_pattern.astype(np.int16),
+            0,
+            255,
+        ).astype(np.uint8)
+
+        thr = self._resolve_bw_threshold()
+        _, binary_mask = cv2.threshold(residual, thr, 255, cv2.THRESH_BINARY)
+        return binary_mask
     
     def difference_mask(self, frame):
         """Create a binary mask of differences from static pattern"""
@@ -412,17 +441,7 @@ class StaticPatternRemover:
         
         diff = np.abs(frame.astype(np.int16) - self.static_pattern.astype(np.int16)).astype(np.uint8)
         
-        # Determine threshold
-        mode = str(getattr(self.config, 'BW_THRESHOLD_MODE', 'auto')).lower()
-        bw = getattr(self.config, 'BW_THRESHOLD', 0.0)
-        
-        if mode == 'absolute' or (mode == 'auto' and bw > 1.0):
-            thr = int(min(max(bw, 0), 255))
-        elif mode == 'relative' or (mode == 'auto' and 0.0 <= bw <= 1.0):
-            thr = int(min(max(bw, 0.0), 1.0) * 255)
-        else:
-            thr = 25  # Default threshold
-        
+        thr = self._resolve_bw_threshold()
         _, binary_mask = cv2.threshold(diff, thr, 255, cv2.THRESH_BINARY)
         return binary_mask
 
@@ -435,6 +454,13 @@ class FishDetector:
     
     def __init__(self, config):
         self.config = config
+
+        pattern_mode = str(getattr(self.config, 'PATTERN_DETECTION_MODE', 'subtract_positive')).lower()
+        if pattern_mode in {"matlab", "positive", "positive_residual"}:
+            pattern_mode = "subtract_positive"
+        elif pattern_mode in {"abs", "difference", "absolute_difference"}:
+            pattern_mode = "abs_diff"
+        self.pattern_detection_mode = pattern_mode
         
         # Static pattern support
         self.static_pattern_remover = StaticPatternRemover(config)
@@ -462,11 +488,11 @@ class FishDetector:
         self.config.print_summary()
     
     def detect_fish(self, frame, frame_index=None):
-        """Detect fish with optional static-pattern differencing.
+        """Detect fish with optional static-pattern preprocessing.
 
-        When static pattern mode is active and a pattern is available, use
-        BW_THRESHOLD/BW_THRESHOLD_MODE on frame-vs-pattern difference.
-        Otherwise fall back to INTENSITY_THRESHOLD on the working frame.
+        Pattern mode behavior is controlled by PATTERN_DETECTION_MODE:
+        - subtract_positive (default): MATLAB parity, threshold max(frame-pattern, 0)
+        - abs_diff: threshold abs(frame-pattern) (legacy behavior)
         """
         self.frame_count += 1
         
@@ -493,12 +519,15 @@ class FishDetector:
             self.static_pattern_remover.add_frame_for_pattern(frame)
         
         # Detection mask:
-        # - Pattern mode: threshold absolute frame-vs-pattern difference
+        # - Pattern mode: configurable thresholding against static pattern
         # - Fallback: intensity threshold on corrected frame
         use_pattern = getattr(self.config, 'USE_STATIC_PATTERN', False)
         mask = None
         if use_pattern:
-            mask = self.static_pattern_remover.difference_mask(frame)
+            if self.pattern_detection_mode == "abs_diff":
+                mask = self.static_pattern_remover.difference_mask(frame)
+            else:
+                mask = self.static_pattern_remover.positive_residual_mask(frame)
 
         if mask is None:
             frame_corrected = self.static_pattern_remover.remove_pattern(frame) if use_pattern else frame
