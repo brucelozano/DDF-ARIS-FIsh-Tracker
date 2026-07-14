@@ -349,11 +349,13 @@ class StaticPatternRemover:
         self.frame_accumulator = None
         self.frame_count = 0
         self.max_frames_for_pattern = getattr(config, 'STATIC_PATTERN_FRAMES', 200)
-        
+        use_pattern = bool(getattr(self.config, 'USE_STATIC_PATTERN', False))
+        pattern_path = str(getattr(self.config, 'STATIC_PATTERN_FILE', "") or "")
+
         # Try to load offline static pattern if provided
         try:
-            if getattr(self.config, 'USE_STATIC_PATTERN', False) and getattr(self.config, 'STATIC_PATTERN_FILE', ""):
-                path = self.config.STATIC_PATTERN_FILE
+            if use_pattern and pattern_path:
+                path = pattern_path
                 if path.lower().endswith('.npy') and os.path.exists(path):
                     self.static_pattern = self._pattern_to_uint8(np.load(path))
                     self.pattern_computed = True
@@ -370,8 +372,18 @@ class StaticPatternRemover:
                             break
                 else:
                     print(f"Static pattern file not found: {path}")
+            elif use_pattern and not pattern_path:
+                print("Static pattern enabled with no file path; building pattern from live frames.")
+            elif (not use_pattern) and pattern_path:
+                print(f"Static pattern file configured but USE_STATIC_PATTERN is false; ignoring file: {pattern_path}")
         except Exception as e:
             print(f"Warning: failed to load static pattern: {e}")
+
+        if use_pattern and not self.pattern_computed:
+            print(
+                "Static pattern warmup active: "
+                f"averaging first {self.max_frames_for_pattern} frames."
+            )
     
     def add_frame_for_pattern(self, frame):
         """Add frame to pattern computation"""
@@ -464,6 +476,13 @@ class FishDetector:
         
         # Static pattern support
         self.static_pattern_remover = StaticPatternRemover(config)
+        if bool(getattr(self.config, 'USE_STATIC_PATTERN', False)):
+            if self.static_pattern_remover.pattern_computed:
+                print("Static pattern mode: ON (using precomputed file)")
+            else:
+                print("Static pattern mode: ON (using warmup average)")
+        else:
+            print("Static pattern mode: OFF (intensity threshold only)")
         
         # Tracking state
         self.tracks = []
@@ -514,14 +533,14 @@ class FishDetector:
             )
             self.validation_filter_pending = None
         
-        # Build static pattern from initial frames if not yet computed
-        if not self.static_pattern_remover.pattern_computed:
+        # Build static pattern from initial frames if pattern mode is enabled.
+        use_pattern = getattr(self.config, 'USE_STATIC_PATTERN', False)
+        if use_pattern and not self.static_pattern_remover.pattern_computed:
             self.static_pattern_remover.add_frame_for_pattern(frame)
         
         # Detection mask:
         # - Pattern mode: configurable thresholding against static pattern
         # - Fallback: intensity threshold on corrected frame
-        use_pattern = getattr(self.config, 'USE_STATIC_PATTERN', False)
         mask = None
         if use_pattern:
             if self.pattern_detection_mode == "abs_diff":
